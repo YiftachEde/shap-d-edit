@@ -24,9 +24,23 @@ THE SOFTWARE.
 
 import numpy as np
 import torch as th
-
+from tqdm import tqdm
 from .gaussian_diffusion import GaussianDiffusion, mean_flat
 
+def _extract_into_tensor(arr, timesteps, broadcast_shape):
+        """
+        Extract values from a 1-D numpy array for a batch of indices.
+
+        :param arr: the 1-D numpy array.
+        :param timesteps: a tensor of indices into the array to extract.
+        :param broadcast_shape: a larger shape of K dimensions with the batch
+                                dimension equal to the length of timesteps.
+        :return: a tensor of shape [batch_size, 1, ...] where the shape has K dims.
+        """
+        res = th.from_numpy(arr).to(device=timesteps.device)[timesteps].float()
+        while len(res.shape) < len(broadcast_shape):
+            res = res[..., None]
+        return res + th.zeros(broadcast_shape, device=timesteps.device)
 
 class KarrasDenoiser:
     def __init__(self, sigma_data: float = 0.5):
@@ -82,6 +96,7 @@ class GaussianToKarrasDenoiser:
 
         self.model = model
         self.diffusion = diffusion
+        # print(diffusion.alphas_cumprod.shape)
         self.alpha_cumprod_to_t = interpolate.interp1d(
             diffusion.alphas_cumprod, np.arange(0, diffusion.num_timesteps)
         )
@@ -93,7 +108,29 @@ class GaussianToKarrasDenoiser:
         elif alpha_cumprod <= self.diffusion.alphas_cumprod[-1]:
             return self.diffusion.num_timesteps - 1
         else:
-            return float(self.alpha_cumprod_to_t(alpha_cumprod))
+            return int(self.alpha_cumprod_to_t(alpha_cumprod))
+   
+    
+
+    def condition_score(self, cond_fn, p_mean_var, x, t, **model_kwargs):
+        """
+        Compute what the p_mean_variance output would have been, should the
+        model's score function be conditioned by cond_fn.
+
+        See condition_mean() for details on cond_fn.
+
+        Unlike condition_mean(), this instead uses the conditioning strategy
+        from Song et al (2020).
+        """
+        alpha_bar = _extract_into_tensor(self.alphas_cumprod, t, x.shape)
+
+        eps = self._predict_eps_from_xstart(x, t, p_mean_var["pred_xstart"])
+        eps = eps - (1 - alpha_bar).sqrt() * cond_fn(p_mean_var["pred_xstart"], **(model_kwargs or {}))
+
+        out = p_mean_var.copy()
+        out["pred_xstart"] = self._predict_xstart_from_eps(x, t, eps)
+        out["mean"], _, _ = self.q_posterior_mean_variance(x_start=out["pred_xstart"], x_t=x, t=t)
+        return out
 
     def denoise(self, x_t, sigmas, clip_denoised=True, model_kwargs=None):
         t = th.tensor(
@@ -110,10 +147,11 @@ class GaussianToKarrasDenoiser:
 
 def karras_sample(*args, **kwargs):
     last = None
-    for x in karras_sample_progressive(*args, **kwargs):
+    noise = kwargs.pop("noise", None)
+    for x in karras_sample_progressive(*args,noise=noise, **kwargs):
         last = x["x"]
+        noise = last
     return last
-
 
 def karras_sample_progressive(
     diffusion,
@@ -133,15 +171,19 @@ def karras_sample_progressive(
     s_tmax=float("inf"),
     s_noise=1.0,
     guidance_scale=0.0,
+    noise=None,
+    guidance_fn = None
 ):
+    # print(steps)
     sigmas = get_sigmas_karras(steps, sigma_min, sigma_max, rho, device=device)
-    x_T = th.randn(*shape, device=device) * sigma_max
+    # print(sigma_min,sigma_max,rho)
+    x_T = th.randn(*shape, device=device) * sigma_max if noise is None else noise
     sample_fn = {"heun": sample_heun, "dpm": sample_dpm, "ancestral": sample_euler_ancestral}[
         sampler
     ]
 
     if sampler != "ancestral":
-        sampler_args = dict(s_churn=s_churn, s_tmin=s_tmin, s_tmax=s_tmax, s_noise=s_noise)
+        sampler_args = dict(s_churn=s_churn, s_tmin=s_tmin, s_tmax=s_tmax, s_noise=s_noise, guidance_fn=guidance_fn, diffusion=diffusion)
     else:
         sampler_args = {}
 
@@ -155,7 +197,6 @@ def karras_sample_progressive(
 
     elif isinstance(diffusion, GaussianDiffusion):
         model = GaussianToKarrasDenoiser(model, diffusion)
-
         def denoiser(x_t, sigma):
             _, denoised = model.denoise(
                 x_t, sigma, clip_denoised=clip_denoised, model_kwargs=model_kwargs
@@ -172,8 +213,15 @@ def karras_sample_progressive(
             sigma = th.cat([sigma, sigma], dim=0)
             x_0 = denoiser(x_t, sigma)
             cond_x_0, uncond_x_0 = th.split(x_0, len(x_0) // 2, dim=0)
-            x_0 = uncond_x_0 + guidance_scale * (cond_x_0 - uncond_x_0)
-            return x_0
+            x_0_cfg = uncond_x_0 + guidance_scale * (cond_x_0 - uncond_x_0)
+            p_mean_var = {'pred_xstart': cond_x_0, 'mean': cond_x_0}
+            t = th.tensor(model.sigma_to_t(sigma[0:1].cpu())).to(x_t.device)
+            cond_kwargs = model_kwargs.copy()
+            cond_kwargs['cond_or_uncond'] = 'noisy'
+            cg_grad = guidance_fn(x_t)
+
+            # x_0 = x_0.clamp(-1,1)
+            return x_0_cfg,cg_grad
 
     else:
         guided_denoiser = denoiser
@@ -245,6 +293,8 @@ def sample_heun(
     s_tmin=0.0,
     s_tmax=float("inf"),
     s_noise=1.0,
+    guidance_fn = None,
+    diffusion = None,
 ):
     """Implements Algorithm 2 (Heun steps) from Karras et al. (2022)."""
     s_in = x.new_ones([x.shape[0]])
@@ -259,24 +309,30 @@ def sample_heun(
             min(s_churn / (len(sigmas) - 1), 2**0.5 - 1) if s_tmin <= sigmas[i] <= s_tmax else 0.0
         )
         eps = th.randn_like(x) * s_noise
+        guidance_fn = guidance_fn if guidance_fn is not None else lambda _ : 0
         sigma_hat = sigmas[i] * (gamma + 1)
         if gamma > 0:
             x = x + eps * (sigma_hat**2 - sigmas[i] ** 2) ** 0.5
-        denoised = denoiser(x, sigma_hat * s_in)
-        d = to_d(x, sigma_hat, denoised)
-        yield {"x": x, "i": i, "sigma": sigmas[i], "sigma_hat": sigma_hat, "pred_xstart": denoised}
+        denoised_cfg,grad_cg= denoiser(x, sigma_hat * s_in)
+        d_cfg = to_d(x, sigma_hat, denoised_cfg)
+        # d_cg = to_d(x, sigma_hat, denoised_cg)
+        d_cg = grad_cg/sigma_hat
+        yield {"x": x, "i": i, "sigma": sigmas[i], "sigma_hat": sigma_hat, "pred_xstart": grad_cg}
         dt = sigmas[i + 1] - sigma_hat
         if sigmas[i + 1] == 0:
             # Euler method
-            x = x + d * dt
+            x = x + (d_cfg+d_cg) * dt
         else:
             # Heun's method
+            d = (d_cfg)
             x_2 = x + d * dt
-            denoised_2 = denoiser(x_2, sigmas[i + 1] * s_in)
-            d_2 = to_d(x_2, sigmas[i + 1], denoised_2)
-            d_prime = (d + d_2) / 2
+            denoised_cfg_2,grad_cg_2 = denoiser(x_2, sigmas[i + 1] * s_in)
+            d_cfg_2 = to_d(x_2, sigmas[i + 1], denoised_cfg_2)
+            d_cg_2 = grad_cg_2/sigmas[i + 1]
+            d_2 = (d_cfg_2)
+            d_prime = (d + d_2) 
             x = x + d_prime * dt
-    yield {"x": x, "pred_xstart": denoised}
+    yield {"x": x, "pred_xstart": d_cg}
 
 
 @th.no_grad()

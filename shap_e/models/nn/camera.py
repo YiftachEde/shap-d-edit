@@ -197,7 +197,6 @@ def projective_camera_frame(
     )
     return camera
 
-
 @torch.no_grad()
 def get_image_coords(width, height) -> torch.Tensor:
     pixel_indices = torch.arange(height * width)

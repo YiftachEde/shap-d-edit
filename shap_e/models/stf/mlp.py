@@ -174,7 +174,7 @@ class MLPModel(MetaModule, Model):
                 parameters.extend(layer.parameters())
 
         h_final, h_directionless = checkpoint(
-            mlp, (position,), parameters, options.checkpoint_stf_model
+            mlp, (position,), parameters, True
         )
 
         return h_final, h_directionless

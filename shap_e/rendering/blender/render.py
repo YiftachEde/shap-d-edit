@@ -30,15 +30,17 @@ def render_model(
     verbose: bool = False,
     timeout: float = 15 * 60,
 ):
+    # print("starting anew")
+
     with tempfile.TemporaryDirectory() as tmp_dir:
         tmp_in = model_path
         tmp_out = os.path.join(tmp_dir, "out")
         zip_out = tmp_out + ".zip"
         os.mkdir(tmp_out)
         args = []
-        if platform.system() == "Linux":
-            # Needed to enable Eevee backend on headless linux.
-            args = ["xvfb-run", "-a"]
+        # if platform.system() == "Linux":
+        #     # Needed to enable Eevee backend on headless linux.
+        #     args = ["xvfb-run", "-a"]
         args.extend(
             [
                 _blender_binary_path(),
@@ -70,6 +72,7 @@ def render_model(
                 str(BASIC_DIFFUSE_COLOR),
             ]
         )
+        # print(" ".join(args))
         if fast_mode:
             args.append("--fast_mode")
         if extract_material:
@@ -95,7 +98,7 @@ def render_model(
             for name in os.listdir(tmp_out):
                 zf.write(os.path.join(tmp_out, name), name)
         bf.copy(zip_out, output_path, overwrite=True)
-
+        # print("done with it now")
 
 def render_mesh(
     mesh: TriMesh,

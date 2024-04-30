@@ -73,7 +73,7 @@ def render_rays(
     t0 = None
     results = None
 
-    for part_i, prev_raw_i in zip(parts, prev_raw_outputs):
+    for i ,(part_i, prev_raw_i) in enumerate(zip(parts, prev_raw_outputs)):
 
         # Integrate over [t[i], t[i + 1]]
         results_i = part_i.render_rays(

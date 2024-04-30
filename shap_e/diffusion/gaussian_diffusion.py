@@ -9,6 +9,7 @@ import blobfile as bf
 import numpy as np
 import torch as th
 import yaml
+from tqdm import tqdm, trange
 
 
 def diffusion_from_config(config: Union[str, Dict[str, Any]]) -> "GaussianDiffusion":
@@ -329,6 +330,7 @@ class GaussianDiffusion:
             model_kwargs = {}
 
         B, C = x.shape[:2]
+        
         assert t.shape == (B,)
         model_output = model(x, t, **model_kwargs)
         if isinstance(model_output, tuple):
@@ -432,7 +434,7 @@ class GaussianDiffusion:
         new_mean = p_mean_var["mean"].float() + p_mean_var["variance"] * gradient.float()
         return new_mean
 
-    def condition_score(self, cond_fn, p_mean_var, x, t, model_kwargs=None):
+    def condition_score(self, cond_fn, p_mean_var, x, t, **model_kwargs):
         """
         Compute what the p_mean_variance output would have been, should the
         model's score function be conditioned by cond_fn.
@@ -445,11 +447,11 @@ class GaussianDiffusion:
         alpha_bar = _extract_into_tensor(self.alphas_cumprod, t, x.shape)
 
         eps = self._predict_eps_from_xstart(x, t, p_mean_var["pred_xstart"])
-        eps = eps - (1 - alpha_bar).sqrt() * cond_fn(x, t, **(model_kwargs or {}))
+        eps = eps - (1-alpha_bar).sqrt()*cond_fn(p_mean_var["pred_xstart"], t, **(model_kwargs or {}))
 
         out = p_mean_var.copy()
         out["pred_xstart"] = self._predict_xstart_from_eps(x, t, eps)
-        out["mean"], _, _ = self.q_posterior_mean_variance(x_start=out["pred_xstart"], x_t=x, t=t)
+        # out["mean"], _, _ = self.q_posterior_mean_variance(x_start=out["pred_xstart"], x_t=x, t=t)
         return out
 
     def p_sample(
@@ -628,13 +630,9 @@ class GaussianDiffusion:
 
         alpha_bar = _extract_into_tensor(self.alphas_cumprod, t, x.shape)
         alpha_bar_prev = _extract_into_tensor(self.alphas_cumprod_prev, t, x.shape)
-        sigma = (
-            eta
-            * th.sqrt((1 - alpha_bar_prev) / (1 - alpha_bar))
-            * th.sqrt(1 - alpha_bar / alpha_bar_prev)
-        )
+        sigma = 0
         # Equation 12.
-        noise = th.randn_like(x)
+        noise = th.zeros_like(x)
         mean_pred = (
             out["pred_xstart"] * th.sqrt(alpha_bar_prev)
             + th.sqrt(1 - alpha_bar_prev - sigma**2) * eps
@@ -682,7 +680,43 @@ class GaussianDiffusion:
         mean_pred = out["pred_xstart"] * th.sqrt(alpha_bar_next) + th.sqrt(1 - alpha_bar_next) * eps
 
         return {"sample": mean_pred, "pred_xstart": out["pred_xstart"]}
+    @th.no_grad()
+    def ddim_inversion(self,model, latent,clip_denoised=False,
+        denoised_fn=None,
+        model_kwargs=None,):
 
+        timesteps = list(range(self.num_timesteps))
+        latents = []
+        with th.autocast(device_type='cuda', enabled=True):
+            for i, t in enumerate(tqdm(timesteps)):
+                t = th.tensor([t] * latent.shape[0], device=latent.device)
+
+                alpha_prod_t = self.alphas_cumprod[t]
+                alpha_prod_t_prev = (
+                    self.alphas_cumprod[timesteps[i - 1]]
+                    if i > 0 else self.alphas_cumprod[0]
+                )
+
+                mu = alpha_prod_t ** 0.5
+                mu_prev = alpha_prod_t_prev ** 0.5
+                sigma = (1 - alpha_prod_t) ** 0.5
+                sigma_prev = (1 - alpha_prod_t_prev) ** 0.5
+                out = self.p_mean_variance(
+                    model,
+                    latent,
+                    t,
+                    clip_denoised=clip_denoised,
+                    denoised_fn=denoised_fn,
+                    model_kwargs=model_kwargs,
+                )
+                eps = self._predict_eps_from_xstart(latent, t, out["pred_xstart"])
+
+                pred_x0 = (latent - sigma_prev * eps) / mu_prev
+                latent = mu * pred_x0 + sigma * eps
+                latents += [latent]
+                # if save_latents:
+                    # torch.save(latent, os.path.join(save_path, f'noisy_latents_{t}.pt'))
+        return latents
     def ddim_sample_loop(
         self,
         model,
@@ -696,6 +730,7 @@ class GaussianDiffusion:
         progress=False,
         eta=0.0,
         temp=1.0,
+        latent=None,
     ):
         """
         Generate samples from the model using DDIM.
@@ -706,6 +741,7 @@ class GaussianDiffusion:
         for sample in self.ddim_sample_loop_progressive(
             model,
             shape,
+            # t_sample_from=t_sample_from
             noise=noise,
             clip_denoised=clip_denoised,
             denoised_fn=denoised_fn,
@@ -732,6 +768,7 @@ class GaussianDiffusion:
         progress=False,
         eta=0.0,
         temp=1.0,
+        time_steps=None
     ):
         """
         Use DDIM to sample from the model and yield intermediate samples from
@@ -743,11 +780,13 @@ class GaussianDiffusion:
             device = next(model.parameters()).device
         assert isinstance(shape, (tuple, list))
         if noise is not None:
-            img = noise
+            img = th.cat((noise,noise),dim=0)
         else:
             img = th.randn(*shape, device=device) * temp
-        indices = list(range(self.num_timesteps))[::-1]
-
+        if time_steps is None:
+            indices = list(range(self.num_timesteps))[::-1]
+        else:
+            indices = list(range(time_steps))[::-1]
         if progress:
             # Lazy import so that we don't depend on tqdm.
             from tqdm.auto import tqdm

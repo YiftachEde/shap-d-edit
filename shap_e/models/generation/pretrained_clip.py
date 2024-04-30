@@ -86,7 +86,6 @@ class ImageCLIP(nn.Module):
         assert len(image_seq) == batch_size, "number of images should match batch size"
         assert len(text_seq) == batch_size, "number of texts should match batch size"
         assert len(embedding_seq) == batch_size, "number of embeddings should match batch size"
-
         if self.ensure_used_params:
             return self._static_multimodal_embed(
                 images=image_seq, texts=text_seq, embeddings=embedding_seq

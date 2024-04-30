@@ -43,6 +43,7 @@ URL_HASHES = {
 
 @lru_cache()
 def default_cache_dir() -> str:
+    print(os.path.join(os.path.abspath(os.getcwd()), "shap_e_model_cache"))
     return os.path.join(os.path.abspath(os.getcwd()), "shap_e_model_cache")
 
 
@@ -133,6 +134,7 @@ def load_checkpoint(
     path = fetch_file_cached(
         MODEL_PATHS[checkpoint_name], progress=progress, cache_dir=cache_dir, chunk_size=chunk_size
     )
+    print(cache_dir,"is the location")
     return torch.load(path, map_location=device)
 
 

@@ -13,7 +13,7 @@ from shap_e.rendering.torch_mesh import TorchMesh
 from shap_e.util.collections import AttrDict
 
 
-def create_pan_cameras(size: int, device: torch.device) -> DifferentiableCameraBatch:
+def create_pan_cameras(size: int, device: torch.device, n_samples=-1) -> DifferentiableCameraBatch:
     origins = []
     xs = []
     ys = []
@@ -28,6 +28,13 @@ def create_pan_cameras(size: int, device: torch.device) -> DifferentiableCameraB
         xs.append(x)
         ys.append(y)
         zs.append(z)
+    if n_samples > 0:
+        
+        indices = np.arange(0, n_samples)
+        origins = [origins[i] for i in indices]
+        xs = [xs[i] for i in indices]
+        ys = [ys[i] for i in indices]
+        zs = [zs[i] for i in indices]
     return DifferentiableCameraBatch(
         shape=(1, len(xs)),
         flat_camera=DifferentiableProjectiveCamera(
@@ -43,7 +50,7 @@ def create_pan_cameras(size: int, device: torch.device) -> DifferentiableCameraB
     )
 
 
-@torch.no_grad()
+# @torch.no_grad()
 def decode_latent_images(
     xm: Union[Transmitter, VectorDecoder],
     latent: torch.Tensor,
@@ -57,11 +64,10 @@ def decode_latent_images(
         ),
         options=AttrDict(rendering_mode=rendering_mode, render_with_direction=False),
     )
-    arr = decoded.channels.clamp(0, 255).to(torch.uint8)[0].cpu().numpy()
-    return [Image.fromarray(x) for x in arr]
+    # arr = decoded.channels.clamp(0, 255).to(torch.uint8)[0].cpu().numpy()
+    return decoded
 
 
-@torch.no_grad()
 def decode_latent_mesh(
     xm: Union[Transmitter, VectorDecoder],
     latent: torch.Tensor,

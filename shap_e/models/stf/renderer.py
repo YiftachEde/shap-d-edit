@@ -246,12 +246,12 @@ def render_views_from_stf(
             options=options,
         )
 
-        if "cache" in options:
-            options.cache.fields = fields
-            options.cache.raw_meshes = raw_meshes
-            options.cache.raw_signed_distance = raw_signed_distance
-            options.cache.raw_density = raw_density
-            options.cache.mesh_mask = mesh_mask
+        # if "cache" in options:
+        #     options.cache.fields = fields
+        #     options.cache.raw_meshes = raw_meshes
+        #     options.cache.raw_signed_distance = raw_signed_distance
+        #     options.cache.raw_density = raw_density
+        #     options.cache.mesh_mask = mesh_mask
 
     if output_srgb:
         tf_out.channels = _convert_srgb_to_linear(tf_out.channels)
