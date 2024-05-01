@@ -103,7 +103,7 @@ def render_images(
                 device=meshes.device,
                 cameras=cameras,
                 lights=lights,
-                blend_params=BlendParams(sigma=sigma, gamma=gamma, background_color=(0, 0, 0)),
+                blend_params=BlendParams(sigma=sigma, gamma=gamma, background_color=(255.0, 255.0, 255.0)),
             ),
         )
         result = renderer(meshes)

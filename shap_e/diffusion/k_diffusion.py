@@ -314,24 +314,22 @@ def sample_heun(
         if gamma > 0:
             x = x + eps * (sigma_hat**2 - sigmas[i] ** 2) ** 0.5
         denoised_cfg,grad_cg= denoiser(x, sigma_hat * s_in)
-        d_cfg = to_d(x, sigma_hat, denoised_cfg)
-        # d_cg = to_d(x, sigma_hat, denoised_cg)
-        d_cg = grad_cg/sigma_hat
+        d = to_d(x, sigma_hat, denoised_cfg)
+        d_cg = grad_cg
+        
         yield {"x": x, "i": i, "sigma": sigmas[i], "sigma_hat": sigma_hat, "pred_xstart": grad_cg}
         dt = sigmas[i + 1] - sigma_hat
         if sigmas[i + 1] == 0:
             # Euler method
-            x = x + (d_cfg+d_cg) * dt
+            x = x -d_cg +d*dt
         else:
             # Heun's method
-            d = (d_cfg)
-            x_2 = x + d * dt
-            denoised_cfg_2,grad_cg_2 = denoiser(x_2, sigmas[i + 1] * s_in)
-            d_cfg_2 = to_d(x_2, sigmas[i + 1], denoised_cfg_2)
-            d_cg_2 = grad_cg_2/sigmas[i + 1]
-            d_2 = (d_cfg_2)
-            d_prime = (d + d_2) 
-            x = x + d_prime * dt
+            # d = (
+            x_2 = x - d_cg + d*dt
+            denoised_2,d_cg_2 = denoiser(x_2, sigmas[i + 1] * s_in)
+            d_2 = to_d(x_2, sigmas[i + 1], denoised_2)
+            d_prime = (d + d_2) / 2
+            x = x -d_cg-d_cg_2 + d_prime * dt
     yield {"x": x, "pred_xstart": d_cg}
 
 

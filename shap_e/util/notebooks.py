@@ -56,6 +56,7 @@ def decode_latent_images(
     latent: torch.Tensor,
     cameras: DifferentiableCameraBatch,
     rendering_mode: str = "stf",
+    background_color: torch.Tensor = torch.tensor([255.0, 255.0, 255.0], dtype=torch.float32),
 ):
     decoded = xm.renderer.render_views(
         AttrDict(cameras=cameras),
@@ -64,8 +65,11 @@ def decode_latent_images(
         ),
         options=AttrDict(rendering_mode=rendering_mode, render_with_direction=False),
     )
+    bg_color = background_color.to(decoded.channels.device)
+    images = bg_color * decoded.transmittance + (1 - decoded.transmittance) * decoded.channels
+
     # arr = decoded.channels.clamp(0, 255).to(torch.uint8)[0].cpu().numpy()
-    return decoded
+    return images
 
 
 def decode_latent_mesh(

@@ -16,7 +16,7 @@ model_path = "/home/yiftach/main/Research/spic-e/shap-e-data/ModelNet40_ply/chai
 clip_model, _, clip_preprocess = open_clip.create_model_and_transforms('ViT-B-32', pretrained='laion2b_s34b_b79k')
 clip_model = clip_model.eval().to(device)
 clip_tokenizer = open_clip.get_tokenizer('ViT-B-32')
-guide_image = "/home/yiftach/main/Research/shap-e/guide_image2.png"
+guide_image = "/home/yiftach/main/Research/shap-e/guide_image.png"
 # This may take a few minutes, since it requires rendering the model twice
 # in two different modes.
 batch = load_or_create_multimodal_batch(
@@ -64,38 +64,38 @@ guide_image_loaded_tensor = torch.from_numpy(np.array(Image.open(guide_image).co
 guide_image_loaded_tensor = Resize(128)(guide_image_loaded_tensor).squeeze()/255
 def guide_model_via_loss(denoised,embedding=None,embeddings=None,cond_or_uncond="cond"):
     with torch.enable_grad():
-        # global n
-        # x_in = denoised[0:1].detach().requires_grad_(True).squeeze()
-        # cameras = create_pan_cameras(128,device,1)
-        # # camear_sampled_index = torch.randint(0, 20, (1,))
-        # # cameras_sampled = cameras[:,camear_sampled_index:camear_sampled_index+1]
-        # decoded_output = decode_latent_images(xm, x_in,cameras, rendering_mode='nerf')
-        # image = decoded_output.channels.permute(0,1,4,2,3)/255
-        # loss = torch.nn.functional.mse_loss(image.squeeze(), guide_image_loaded_tensor)
-        # grad = torch.autograd.grad(loss, x_in)[0]
+        global n
+        x_in = denoised[0:1].detach().requires_grad_(True).squeeze()
+        cameras = create_pan_cameras(128,device,1)
+        # cameras_sampled = cameras[:,camear_sampled_index:camear_sampled_index+1]
+        decoded_output = decode_latent_images(xm, x_in,cameras, rendering_mode='nerf')
+        image = decoded_output.permute(0,1,4,2,3)/255
+        loss = torch.nn.functional.mse_loss(image.squeeze(),guide_image_loaded_tensor.squeeze())
+        grad = torch.autograd.grad(loss, x_in)[0]
         # torch.cuda.empty_cache()
         # gc.collect()
-        return 0
+        return 1*grad*1e6
     # # with open(f'example_mesh.ply', 'wb') as f:
     #     # mesh.tri_mesh().write_ply(f)
 
     return 0
-model = load_model('image300M', device=device)
+# model = load_model('image300M', device=device)
 image = load_image("guide_image2.png")
 
 latents_new = sample_latents(
     batch_size=batch_size,
     model=model,
     diffusion=diffusion,
-    guidance_scale=3,
-    model_kwargs=dict(images=[image] * batch_size),
+    guidance_scale=12.5,
+    # model_kwargs=dict(images=[image] * batch_size),
+    model_kwargs=dict(texts=["a leather chair"] * batch_size),
     progress=True,
     clip_denoised=True,
     use_fp16=True,
     use_karras=True,
-    karras_steps=12,
+    karras_steps=64,
     sigma_min=1e-3,
-    sigma_max=120,
+    sigma_max=160,
     s_churn=0,
     noise=latents_noised[20].expand(batch_size, -1),
     guidance_fn = guide_model_via_loss
@@ -103,8 +103,8 @@ latents_new = sample_latents(
 with torch.no_grad():
     cameras = create_pan_cameras(512,device)
     for i, latent_code in enumerate(latents_new):
-        decoder_output = decode_latent_images(xm, latent_code, cameras, rendering_mode='stf')
-        arr = decoder_output.channels.clamp(0, 255).to(torch.uint8)[0].cpu().numpy()
+        decoder_output = decode_latent_images(xm, latent_code.float(), cameras, rendering_mode='stf')
+        arr = decoder_output.clamp(0, 255).to(torch.uint8)[0].cpu().numpy()
         images = [Image.fromarray(x) for x in arr]
         import io
         import base64
