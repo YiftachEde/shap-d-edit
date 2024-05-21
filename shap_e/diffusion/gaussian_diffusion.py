@@ -717,6 +717,7 @@ class GaussianDiffusion:
                 # if save_latents:
                     # torch.save(latent, os.path.join(save_path, f'noisy_latents_{t}.pt'))
         return latents
+
     def ddim_sample_loop(
         self,
         model,

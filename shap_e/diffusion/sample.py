@@ -4,6 +4,7 @@ import torch
 import torch.nn as nn
 
 from .gaussian_diffusion import GaussianDiffusion
+
 from .k_diffusion import karras_sample
 
 DEFAULT_KARRAS_STEPS = 64
@@ -89,6 +90,7 @@ def sample_latents(
     sigma_min: float,
     sigma_max: float,
     s_churn: float,
+    rho: float = 7.0,
     device: Optional[torch.device] = None,
     noise: Optional[torch.Tensor] = None,
     progress: bool = False,
@@ -121,6 +123,7 @@ def sample_latents(
                 s_churn=s_churn,
                 guidance_scale=guidance_scale,
                 progress=progress,
+                rho=rho,
                 noise=noise,
                 guidance_fn= guidance_fn,
             )

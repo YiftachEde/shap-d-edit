@@ -101,6 +101,15 @@ class GaussianToKarrasDenoiser:
             diffusion.alphas_cumprod, np.arange(0, diffusion.num_timesteps)
         )
 
+    @th.no_grad()
+    def ddpm_inversion(self, latent,sigma_min,sigma_max,steps,device,rho=7.0):
+        sigmas = reversed(get_sigmas_karras(steps, sigma_min, sigma_max, rho, device=device))[:,None]
+        print(sigmas.shape)
+        latent=     latent + th.randn(*latent.shape, device=device) * sigmas 
+        return latent
+
+
+    
     def sigma_to_t(self, sigma):
         alpha_cumprod = 1.0 / (sigma**2 + 1)
         if alpha_cumprod > self.diffusion.alphas_cumprod[0]:
@@ -164,7 +173,7 @@ def karras_sample_progressive(
     device=None,
     sigma_min=0.002,
     sigma_max=80,  # higher for highres?
-    rho=7.0,
+    rho=7,
     sampler="heun",
     s_churn=0.0,
     s_tmin=0.0,
@@ -218,10 +227,9 @@ def karras_sample_progressive(
             t = th.tensor(model.sigma_to_t(sigma[0:1].cpu())).to(x_t.device)
             cond_kwargs = model_kwargs.copy()
             cond_kwargs['cond_or_uncond'] = 'noisy'
-            cg_grad = guidance_fn(x_t)
 
             # x_0 = x_0.clamp(-1,1)
-            return x_0_cfg,cg_grad
+            return x_0_cfg
 
     else:
         guided_denoiser = denoiser
@@ -309,28 +317,27 @@ def sample_heun(
             min(s_churn / (len(sigmas) - 1), 2**0.5 - 1) if s_tmin <= sigmas[i] <= s_tmax else 0.0
         )
         eps = th.randn_like(x) * s_noise
-        guidance_fn = guidance_fn if guidance_fn is not None else lambda _ : 0
+        # guidance_fn = guidance_fn if guidance_fn is not None else lambda _ : 0
         sigma_hat = sigmas[i] * (gamma + 1)
         if gamma > 0:
             x = x + eps * (sigma_hat**2 - sigmas[i] ** 2) ** 0.5
-        denoised_cfg,grad_cg= denoiser(x, sigma_hat * s_in)
-        d = to_d(x, sigma_hat, denoised_cfg)
-        d_cg = grad_cg
+        denoised = denoiser(x, sigma_hat * s_in)
+        d = to_d(x, sigma_hat, denoised)
         
-        yield {"x": x, "i": i, "sigma": sigmas[i], "sigma_hat": sigma_hat, "pred_xstart": grad_cg}
+        yield {"x": x, "i": i, "sigma": sigmas[i], "sigma_hat": sigma_hat, "pred_xstart": denoised}
         dt = sigmas[i + 1] - sigma_hat
         if sigmas[i + 1] == 0:
             # Euler method
-            x = x -d_cg +d*dt
+            x = x + d*dt
         else:
             # Heun's method
             # d = (
-            x_2 = x - d_cg + d*dt
-            denoised_2,d_cg_2 = denoiser(x_2, sigmas[i + 1] * s_in)
+            x_2 = x + d*dt
+            denoised_2 = denoiser(x_2, sigmas[i + 1] * s_in)
             d_2 = to_d(x_2, sigmas[i + 1], denoised_2)
             d_prime = (d + d_2) / 2
-            x = x -d_cg-d_cg_2 + d_prime * dt
-    yield {"x": x, "pred_xstart": d_cg}
+            x = x + d_prime * dt
+    yield {"x": x, "pred_xstart": x}
 
 
 @th.no_grad()
