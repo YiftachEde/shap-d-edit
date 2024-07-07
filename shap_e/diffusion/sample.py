@@ -2,7 +2,7 @@ from typing import Any, Callable, Dict, Optional
 
 import torch
 import torch.nn as nn
-
+import copy
 from .gaussian_diffusion import GaussianDiffusion
 
 from .k_diffusion import karras_sample
@@ -76,6 +76,73 @@ def sample_latents_noised(
 
     return samples
 
+def sample_latents_combined_guidance(
+    *,
+    batch_size: int,
+    models: Dict[str,nn.Module],
+    diffusion: GaussianDiffusion,
+    model_kwargs: Dict[str, Any],
+    guidance_scales: Dict[str, float],
+    clip_denoised: bool,
+    use_fp16: bool,
+    use_karras: bool,
+    karras_steps: int,
+    sigma_min: float,
+    sigma_max: float,
+    s_churn: float,
+    rho: float = 7.0,
+    device: Optional[torch.device] = None,
+    noise: Optional[torch.Tensor] = None,
+    progress: bool = False,
+    guidance_fn : Optional[Callable[[torch.Tensor], torch.Tensor]] = None,
+) -> torch.Tensor:
+    sample_shape = (batch_size, models['text'].d_latent)
+
+    if device is None:
+        device = next(models['text'].parameters()).device
+    
+    if hasattr(models['text'], "cached_model_kwargs"):
+        text_model_kwargs = copy.deepcopy(model_kwargs)
+        del text_model_kwargs['images']
+        text_model_kwargs = models['text'].cached_model_kwargs(batch_size, text_model_kwargs)
+        for k, v in text_model_kwargs.copy().items():
+            text_model_kwargs[k] = torch.cat([v, torch.zeros_like(v)], dim=0)
+
+    if hasattr(models['image'], "cached_model_kwargs"):
+        image_model_kwargs = copy.deepcopy(model_kwargs)
+        del image_model_kwargs['texts']
+        image_model_kwargs = models['image'].cached_model_kwargs(batch_size, image_model_kwargs)
+        for k, v in image_model_kwargs.copy().items():
+            image_model_kwargs[k] = torch.cat([v, torch.zeros_like(v)], dim=0)
+
+
+    model_kwargs = {'text':text_model_kwargs,'image':image_model_kwargs}
+    # if guidance_scales != 1.0 and guidance_scale != 0.0:
+    #     for k, v in model_kwargs.copy().items():
+    #         model_kwargs[k] = torch.cat([v, torch.zeros_like(v)], dim=0)
+
+    with torch.autocast(device_type=device.type, enabled=use_fp16):
+        samples = karras_sample(
+            diffusion=diffusion,
+            model=models,
+            shape=sample_shape,
+            steps=karras_steps,
+            clip_denoised=clip_denoised,
+            model_kwargs=model_kwargs,
+            device=device,
+            sigma_min=sigma_min,
+            sigma_max=sigma_max,
+            s_churn=s_churn,
+            guidance_scale=guidance_scales,
+            progress=progress,
+            rho=rho,
+            noise=noise,
+            guidance_fn= guidance_fn,
+        )
+
+    return samples
+
+
 def sample_latents(
     *,
     batch_size: int,
@@ -95,6 +162,7 @@ def sample_latents(
     noise: Optional[torch.Tensor] = None,
     progress: bool = False,
     guidance_fn : Optional[Callable[[torch.Tensor], torch.Tensor]] = None,
+    zs: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
     sample_shape = (batch_size, model.d_latent)
 
@@ -126,6 +194,7 @@ def sample_latents(
                 rho=rho,
                 noise=noise,
                 guidance_fn= guidance_fn,
+                zs = zs
             )
         else:
             internal_batch_size = batch_size

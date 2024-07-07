@@ -681,26 +681,22 @@ class GaussianDiffusion:
 
         return {"sample": mean_pred, "pred_xstart": out["pred_xstart"]}
     @th.no_grad()
-    def ddim_inversion(self,model, latent,clip_denoised=False,
+    def ddim_inversion(self,model, latent,guidance_scale,clip_denoised=False,
         denoised_fn=None,
         model_kwargs=None,):
+        # if hasattr(model, "cached_model_kwargs"):
+        batch_size = latent.shape[0]
+        model_kwargs = model.cached_model_kwargs(batch_size, model_kwargs)
+        if guidance_scale != 1.0 and guidance_scale != 0.0:
+            for k, v in model_kwargs.copy().items():
+                model_kwargs[k] = th.cat([v, th.zeros_like(v)], dim=0).to(v.device)
 
         timesteps = list(range(self.num_timesteps))
         latents = []
         with th.autocast(device_type='cuda', enabled=True):
             for i, t in enumerate(tqdm(timesteps)):
+                latent = th.cat([latent,latent],dim=0).to(latent.device)
                 t = th.tensor([t] * latent.shape[0], device=latent.device)
-
-                alpha_prod_t = self.alphas_cumprod[t]
-                alpha_prod_t_prev = (
-                    self.alphas_cumprod[timesteps[i - 1]]
-                    if i > 0 else self.alphas_cumprod[0]
-                )
-
-                mu = alpha_prod_t ** 0.5
-                mu_prev = alpha_prod_t_prev ** 0.5
-                sigma = (1 - alpha_prod_t) ** 0.5
-                sigma_prev = (1 - alpha_prod_t_prev) ** 0.5
                 out = self.p_mean_variance(
                     model,
                     latent,
@@ -709,14 +705,231 @@ class GaussianDiffusion:
                     denoised_fn=denoised_fn,
                     model_kwargs=model_kwargs,
                 )
-                eps = self._predict_eps_from_xstart(latent, t, out["pred_xstart"])
-
+                latent = latent[:batch_size]
+                t = t[:batch_size]
+                cond_pred_xstart = out["pred_xstart"][:batch_size]
+                unconditional_pred_xstart = out["pred_xstart"][batch_size:]
+                pred_x_start = unconditional_pred_xstart + guidance_scale * (cond_pred_xstart - unconditional_pred_xstart)
+                eps = self._predict_eps_from_xstart(latent, t, pred_x_start)
+                alphas_cumprod = th.tensor(self.alphas_cumprod, device=latent.device)
+                alpha_prod_t = alphas_cumprod[t]
+                alpha_prod_t_prev = (
+                    alphas_cumprod[timesteps[i - 1]]
+                    if i > 0 else alphas_cumprod[0]
+                )
+                mu = alpha_prod_t ** 0.5
+                mu_prev = alpha_prod_t_prev ** 0.5
+                sigma = (1 - alpha_prod_t) ** 0.5
+                sigma_prev = (1 - alpha_prod_t_prev) ** 0.5
                 pred_x0 = (latent - sigma_prev * eps) / mu_prev
-                latent = mu * pred_x0 + sigma * eps
+                latent = (mu * pred_x0 + sigma * eps).float()
                 latents += [latent]
                 # if save_latents:
                     # torch.save(latent, os.path.join(save_path, f'noisy_latents_{t}.pt'))
         return latents
+    
+    def sample_xts_from_x0(self, x0,timesteps):
+        """
+        Samples from P(x_1:T|x_0)
+        """
+        # torch.manual_seed(43256465436)
+        alpha_bar = self.alphas_cumprod
+        sqrt_one_minus_alpha_bar = (1-alpha_bar) ** 0.5
+        num_inference_steps = len(timesteps)
+        t_to_idx = {int(v):k for k,v in enumerate(timesteps)}
+        xts = th.zeros((num_inference_steps+1,*x0.shape)).to(x0.device)
+        xts[0] = x0
+        for t in reversed(timesteps):
+            idx = num_inference_steps-t_to_idx[int(t)]
+            xts[idx] = x0 * (alpha_bar[t] ** 0.5) +  th.randn_like(x0) * sqrt_one_minus_alpha_bar[t]
+
+
+        return xts
+
+    def ddpm_inversion(self, model, x0, cfg_scale,
+                            clip_denoised=True,model_kwargs=None,num_inference_steps=1024,prog_bar=True):
+        batch_size = x0.shape[0]
+        skip_steps = len(self.alphas_cumprod)//num_inference_steps
+        step_ratio = len(self.alphas_cumprod) // num_inference_steps
+        # creates integer timesteps by multiplying by ratio
+        # casting to int to avoid issues when num_inference_step is power of 3
+        timesteps = (np.arange(0, num_inference_steps) * step_ratio).round()[::-1].copy().astype(np.int64)
+        timesteps += 1
+        xts = self.sample_xts_from_x0(x0,timesteps)
+        # xts_noised = xts.clone()
+        zs = th.zeros(size=xts.shape, device=model.device)
+        t_to_idx = {int(v):k for k,v in enumerate(timesteps)}
+        xt = x0
+        # op = tqdm(reversed(timesteps)) if prog_bar else reversed(timesteps)
+        op = tqdm(timesteps) if prog_bar else timesteps
+        model_kwargs = model.cached_model_kwargs(batch_size, model_kwargs)
+        # if guidance_scale != 1.0 and guidance_scale != 0.0:
+        for k, v in model_kwargs.copy().items():
+            model_kwargs[k] = th.cat([v, th.zeros_like(v)], dim=0)
+        for t in op:
+            # idx = t_to_idx[int(t)]
+            idx = num_inference_steps-t_to_idx[int(t)]-1
+            xt = xts[idx+1]
+
+            # 1. predict noise residual
+            t = th.tensor([t,t]).to(model.device)
+            xt = th.cat([xt,xt],dim=0).to(model.device)
+            with th.no_grad():
+                out = self.p_mean_variance(
+                    model,
+                    xt,
+                    t,
+                    clip_denoised=clip_denoised,
+                    denoised_fn=None,
+                    model_kwargs=model_kwargs,
+                )
+            xstart_pred = out['pred_xstart']
+            cond_pred_xstart = xstart_pred[:batch_size]
+            unconditional_pred_xstart = xstart_pred[batch_size:]
+            pred_original_sample = unconditional_pred_xstart + cfg_scale * (cond_pred_xstart - unconditional_pred_xstart)
+            noise_pred = self._predict_eps_from_xstart(xt[:batch_size], t[:batch_size], pred_original_sample)
+            # xtm1 =  xts[idx+1][None]
+            xtm1 =  xts[idx][None]            
+            # direction to xt
+            t = t[:batch_size]
+            prev_step = t - skip_steps
+            alpha_prod_t_prev = self.alphas_cumprod[prev_step] if t > 0 else self.alphas_cumprod[0]
+            eta = 1
+            variance = th.tensor(self.get_variance(t,skip_steps)).to(model.device)
+            alpha_prod_t_prev = th.tensor(alpha_prod_t_prev).to(model.device)
+            pred_sample_direction = (1 - alpha_prod_t_prev - eta * variance ) ** (0.5) * noise_pred
+
+            mu_xt = alpha_prod_t_prev ** (0.5) * pred_original_sample + pred_sample_direction
+
+            z = (xtm1 - mu_xt ) / ( eta * variance ** 0.5 )
+            zs[idx] = z
+            noise_correction = eta * variance ** 0.5 * z if variance > 0 else 0
+            # correction to avoid error accumulation
+            xtm1 = mu_xt + noise_correction
+            xts[idx] = xtm1
+
+        if not zs is None: 
+            zs[0] = th.zeros_like(zs[0]) 
+
+        return xt, zs, xts
+
+    def get_variance(self, timestep,skip_steps): #, prev_timestep):
+        prev_timestep = timestep - skip_steps
+        alpha_prod_t = self.alphas_cumprod[timestep] 
+        alpha_prod_t_prev = self.alphas_cumprod[prev_timestep] if prev_timestep > 0 else self.alphas_cumprod[0]
+        beta_prod_t = 1 - alpha_prod_t
+        beta_prod_t_prev = 1 - alpha_prod_t_prev
+        variance = (beta_prod_t_prev / beta_prod_t) * (1 - alpha_prod_t / alpha_prod_t_prev)
+        return variance
+
+
+    def reverse_step(self,model, model_output, timestep, sample,skip_steps, eta = 0, variance_noise=None):
+        # 1. get previous step value (=t-1)
+        prev_timestep = timestep - skip_steps
+        
+        # 2. compute alphas, betas
+        alpha_prod_t = self.alphas_cumprod[timestep]
+        alpha_prod_t_prev = self.alphas_cumprod[prev_timestep] if prev_timestep > 0 else self.alphas_cumprod[0]
+        beta_prod_t = 1 - alpha_prod_t
+        # 3. compute predicted original sample from predicted noise also called
+        # "predicted x_0" of formula (12) from https://arxiv.org/pdf/2010.02502.pdf
+        pred_original_sample = (sample - beta_prod_t ** (0.5) * model_output) / alpha_prod_t ** (0.5)
+        # 5. compute variance: "sigma_t(η)" -> see formula (16)
+        # σ_t = sqrt((1 − α_t−1)/(1 − α_t)) * sqrt(1 − α_t/α_t−1)    
+        # variance = self.scheduler._get_variance(timestep, prev_timestep)
+        variance = self.get_variance(timestep,skip_steps) #, prev_timestep)
+        std_dev_t = eta * variance ** (0.5)
+        # Take care of asymetric reverse process (asyrp)
+        model_output_direction = model_output
+        # 6. compute "direction pointing to x_t" of formula (12) from https://arxiv.org/pdf/2010.02502.pdf
+        # pred_sample_direction = (1 - alpha_prod_t_prev - std_dev_t**2) ** (0.5) * model_output_direction
+        pred_sample_direction = (1 - alpha_prod_t_prev - eta * variance) ** (0.5) * model_output_direction
+        # 7. compute x_t without "random noise" of formula (12) from https://arxiv.org/pdf/2010.02502.pdf
+        prev_sample = alpha_prod_t_prev ** (0.5) * pred_original_sample + pred_sample_direction
+        # 8. Add noice if eta > 0
+        if eta > 0:
+            if variance_noise is None:
+                variance_noise = th.randn(model_output.shape, device=model.device)
+            sigma_z =  eta * variance ** (0.5) * variance_noise
+            prev_sample = prev_sample + sigma_z
+
+        return prev_sample
+
+    def inversion_reverse_process(self,model,
+                        xT, 
+                        etas = 0,
+                        prompts = "",
+                        cfg_scales = None,
+                        prog_bar = False,
+                        num_steps = 128,
+                        zs = None,
+                        controller=None,
+                        clip_denoised=False,
+                        model_kwargs = None):
+
+        batch_size = len(prompts)
+
+        # cfg_scales_tensor = th.tensor(cfg_scales).view(-1,1,1,1).to(model.device)
+
+        # text_embeddings = encode_text(model, prompts)
+        # uncond_embedding = encode_text(model, [""] * batch_size)
+        if etas is None: etas = 1
+        
+        # etas = 1.0
+        # if type(etas) in [int, float]: etas = [etas]*40
+        # assert len(etas) == 1
+        skip_steps = len(self.alphas_cumprod)//128
+        # timesteps = list(reversed(list(range(0,len(self.alphas_cumprod),skip_steps))))
+        step_ratio = len(self.alphas_cumprod) // num_steps
+        # creates integer timesteps by multiplying by ratio
+        # casting to int to avoid issues when num_inference_step is power of 3
+        timesteps = (np.arange(0, num_steps) * step_ratio).round()[::-1].copy().astype(np.int64)
+        timesteps += 1
+
+        # timesteps = model.scheduler.timesteps.to(model.device)
+
+        xt = xT.expand(batch_size, -1)
+        op = tqdm(timesteps[-zs.shape[0]:]) if prog_bar else timesteps[-zs.shape[0]:] 
+
+        t_to_idx = {int(v):k for k,v in enumerate(timesteps[-zs.shape[0]:])}
+        model_kwargs = {'texts':prompts} if model_kwargs is None else model_kwargs
+        model_kwargs = model.cached_model_kwargs(batch_size, model_kwargs)
+        # if guidance_scale != 1.0 and guidance_scale != 0.0:
+        for k, v in model_kwargs.copy().items():
+            model_kwargs[k] = th.cat([v, th.zeros_like(v)], dim=0)
+
+        for t in op:
+            idx = len(timesteps)-t_to_idx[int(t)]-(len(timesteps)-zs.shape[0]+1)    
+            ## Unconditional embedding
+            xt = th.cat([xt,xt],dim=0).to(xt.device)
+            t = th.tensor([t] * batch_size, device=model.device)
+            t = th.cat([t,t],dim=0).to(t.device)
+            with th.no_grad():
+                out = self.p_mean_variance(
+                    model,
+                    xt,
+                    t,
+                    clip_denoised=clip_denoised,
+                    denoised_fn=None,
+                    model_kwargs=model_kwargs,
+                )
+            uncond_xstart = out['pred_xstart'][batch_size:]
+            cond_xstart = out['pred_xstart'][:batch_size]
+            pred_xstart = uncond_xstart + cfg_scales * (cond_xstart - uncond_xstart)
+            noise_pred = self._predict_eps_from_xstart(xt[:batch_size],t[:batch_size],pred_xstart)
+            z = zs[idx] if not zs is None else None
+            # z = z.expand(batch_size, -1, -1, -1)
+            # if prompts:
+            #     ## classifier free guidance
+            #     noise_pred = uncond_out.sample + cfg_scales_tensor * (cond_out.sample - uncond_out.sample)
+            # else: 
+            #     noise_pred = uncond_out.sample
+            # 2. compute less noisy image and set x_t -> x_t-1  
+            xt = self.reverse_step(model, noise_pred, t[:batch_size], xt[:batch_size],skip_steps=skip_steps, eta = 1, variance_noise = z) 
+            if controller is not None:
+                xt = controller.step_callback(xt)        
+        return xt, zs
+
 
     def ddim_sample_loop(
         self,

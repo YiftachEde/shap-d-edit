@@ -10,7 +10,8 @@ from shap_e.models.nn.utils import to_torch
 from shap_e.models.query import Query
 from shap_e.models.renderer import RayRenderer, render_views_from_rays
 from shap_e.models.stf.base import Model
-from shap_e.models.stf.renderer import STFRendererBase, render_views_from_stf
+from shap_e.models.stf.renderer import STFRendererBase, render_views_from_stf, generate_latent_mask_by_bbox
+from shap_e.models.transmitter.base import Transmitter
 from shap_e.models.volume import BoundingBoxVolume, Volume
 from shap_e.rendering.blender.constants import BASIC_AMBIENT_COLOR, BASIC_DIFFUSE_COLOR
 from shap_e.util.collections import AttrDict
@@ -181,7 +182,86 @@ class NeRSTFRenderer(RayRenderer, STFRendererBase):
             )
 
         return res
+    
+    def generate_latent_mask(
+        self,
+        encoder:Transmitter,
+        latents:torch.Tensor,
+        options: AttrDict[str, Any],
+    ) -> AttrDict:
+        latents.requires_grad = True
+        params = encoder.bottleneck_to_params(latents)
+        params = self.update(params)
+        options = AttrDict() if options is None else AttrDict(options)
 
+        if options.cache is None:
+            created_cache = True
+            options.cache = AttrDict()
+        else:
+            created_cache = False
+
+        rendering_mode = options.get("rendering_mode", "stf")
+        sdf_fn = tf_fn = nerstf_fn = None
+        if self.nerstf is not None:
+            nerstf_fn = partial(
+                self.nerstf.forward_batched,
+                params=subdict(params, "nerstf"),
+                options=options,
+            )
+        else:
+            sdf_fn = partial(
+                self.sdf.forward_batched,
+                params=subdict(params, "sdf"),
+                options=options,
+            )
+            tf_fn = partial(
+                self.tf.forward_batched,
+                params=subdict(params, "tf"),
+                options=options,
+            )
+        
+        # u = torch.tensor([-0.3,0.4,0.6], device=device)
+
+        # u = torch.tensor([-0.3,0.4,0.6], device=device)
+        # l = torch.tensor([-0.8,-0.8,0], device=device)
+                        # l = torch.tensor([-0.3,-0.8,0], device=device)
+        # u = torch.tensor([-0.8,0.6,0.6], device=device)
+
+        # volume = BoundingBoxVolume(bbox_min=[-0.3,-0.8,0],bbox_max=[-0.8,0.6,0.6])
+
+        output = generate_latent_mask_by_bbox(
+            None,
+            options,
+            sdf_fn=sdf_fn,
+            tf_fn=tf_fn,
+            nerstf_fn=nerstf_fn,
+            volume=self.volume,
+            grid_size=self.grid_size,
+            channel_scale=self.channel_scale,
+            texture_channels=self.texture_channels,
+            ambient_color=self.ambient_color,
+            diffuse_color=self.diffuse_color,
+            specular_color=self.specular_color,
+            output_srgb=self.output_srgb,
+            device=self.device,
+        )
+        bottom_left = torch.tensor([-0.8,-0.8,0])
+        top_right = torch.tensor([-0.3,0.6,0.6])
+        points = output['query_points']
+        # Create the binary mask
+        mask = (
+            (points[:, 0] >= bottom_left[0]) & (points[:, 0] <= top_right[0]) &
+            (points[:, 1] >= bottom_left[1]) & (points[:, 1] <= top_right[1]) &
+            (points[:, 2] >= bottom_left[2]) & (points[:, 2] <= top_right[2])
+        )
+
+        # Convert mask to a binary tensor of shape (2097152,)
+        density_output = output['density'][~mask[None,:,None]] 
+        density_output = density_output[density_output>50]
+        param_gradient = torch.autograd.grad(outputs=density_output.norm(), inputs=latents,retain_graph=True)
+
+        return param_gradient    
+    
     def render_views(
         self,
         batch: AttrDict,

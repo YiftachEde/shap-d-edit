@@ -6,6 +6,7 @@ import blobfile as bf
 import numpy as np
 import torch
 from PIL import Image
+import pytorch3d.ops # type: ignore
 
 from shap_e.rendering.blender.render import render_mesh, render_model
 from shap_e.rendering.blender.view_data import BlenderViewData
@@ -23,7 +24,7 @@ def load_or_create_multimodal_batch(
     model_path: Optional[str] = None,
     cache_dir: Optional[str] = None,
     point_count: int = 2**14,
-    random_sample_count: int = 2**19,
+    random_sample_count: int = 2**17,
     pc_num_views: int = 40,
     mv_light_mode: Optional[str] = None,
     mv_num_views: int = 20,
@@ -207,7 +208,11 @@ def mv_to_pc(multiview: ViewData, random_sample_count: int, point_count: int) ->
         pc.coords += np.random.normal(size=pc.coords.shape) * 1e-4
 
     pc = pc.random_sample(random_sample_count)
-    pc = pc.farthest_point_sample(point_count, average_neighbors=True)
+
+    coords_tensor = torch.tensor(pc.coords, dtype=torch.float32).to(device="cuda")
+    coords_filt = pytorch3d.ops.sample_farthest_points(coords_tensor[None],lengths=None,K=point_count)
+    
+    pc = pc.subsample(coords_filt[1].squeeze().cpu().numpy())
 
     return pc
 

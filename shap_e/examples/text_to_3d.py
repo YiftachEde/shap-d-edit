@@ -14,7 +14,7 @@ guidance_scale = 12.5
 prompt = "shark"
 
 latents = sample_latents(
-    batch_size=batch_size,
+batch_size=batch_size,
     model=model,
     diffusion=diffusion,
     guidance_scale=guidance_scale,

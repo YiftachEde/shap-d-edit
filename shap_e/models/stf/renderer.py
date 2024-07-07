@@ -127,7 +127,35 @@ class STFRenderer(Renderer, STFRendererBase):
             options=options,
         ).channels
 
-
+def generate_latent_mask_by_bbox(
+    batch: Dict,
+    options: AttrDict[str, Any],
+    *,
+    sdf_fn: Optional[Callable],
+    tf_fn: Optional[Callable],
+    nerstf_fn: Optional[Callable],
+    volume: BoundingBoxVolume,
+    grid_size: int,
+    channel_scale: torch.Tensor,
+    texture_channels: Sequence[str] = ("R", "G", "B"),
+    ambient_color: Union[float, Tuple[float]] = 0.0,
+    diffuse_color: Union[float, Tuple[float]] = 1.0,
+    specular_color: Union[float, Tuple[float]] = 0.2,
+    output_srgb: bool = False,
+    device: torch.device = torch.device("cuda"),
+) -> AttrDict:
+    # camera, batch_size, inner_shape = get_camera_from_batch(batch)
+    batch_size = 1
+    query_batch_size = 4096
+    query_points = volume_query_points(volume, grid_size)
+    fn = nerstf_fn if sdf_fn is None else sdf_fn
+    sdf_out = fn(
+        query=Query(position=query_points[None].repeat(batch_size, 1, 1)),
+        query_batch_size=query_batch_size,
+        options=options,
+    )
+    sdf_out['query_points'] = query_points
+    return sdf_out
 def render_views_from_stf(
     batch: Dict,
     options: AttrDict[str, Any],
@@ -179,6 +207,7 @@ def render_views_from_stf(
         mesh_mask = options.cache.mesh_mask
     else:
         query_batch_size = batch.get("query_batch_size", batch.get("ray_batch_size", 4096))
+        # volume = BoundingBoxVolume(bbox_min=[-0.8,-0.8,0],bbox_max=[-0.3,0.6,0.6])        
         query_points = volume_query_points(volume, grid_size)
         fn = nerstf_fn if sdf_fn is None else sdf_fn
         sdf_out = fn(
@@ -186,7 +215,16 @@ def render_views_from_stf(
             query_batch_size=query_batch_size,
             options=options,
         )
-        raw_signed_distance = sdf_out.signed_distance
+        # u = torch.tensor([-0.3,0.6,0], device=device)
+        # l = torch.tensor([-0.8,-0.8,0.6], device=device)
+                
+        # l = torch.tensor([-0.3,-0.8,0], device=device)
+        # u = torch.tensor([-0.8,0.6,0.6], device=device)
+        # raw_signed_distance = sdf_out.signed_distance
+        # f = (torch.isclose(query_points,l,atol=0.01) | torch.isclose(query_points,u,atol=0.01)) 
+        # f = f.sum(dim=1) > 1
+        # bound_filter = (((query_points > l) & (query_points<u)).sum(dim=1)>2) 
+        # raw_signed_distance[0, f] = 1
         raw_density = None
         if "density" in sdf_out:
             raw_density = sdf_out.density
