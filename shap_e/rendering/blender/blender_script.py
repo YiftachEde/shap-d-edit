@@ -77,6 +77,11 @@ def scene_bbox(single_obj=None, ignore_matrix=False):
                 coord = obj.matrix_world @ coord
             bbox_min = tuple(min(x, y) for x, y in zip(bbox_min, coord))
             bbox_max = tuple(max(x, y) for x, y in zip(bbox_max, coord))
+        # obj 
+
+        # Check if the rotation mode is Euler
+
+        # Rotate the object by 90 degrees around the specified axis
     if not found:
         raise RuntimeError("no objects in scene to compute bounding box for")
     return Vector(bbox_min), Vector(bbox_max)
@@ -296,6 +301,7 @@ def setup_material_extraction_shader_for_material(mat, capturing_material_alpha:
     # If not, this shader manipulation logic won't work.
     bsdf_node = None
     for node in mat.node_tree.nodes:
+        print(node)
         if node.type == "BSDF_PRINCIPLED":
             bsdf_node = node
     assert bsdf_node is not None, "material has no Principled BSDF node to modify"
@@ -591,7 +597,9 @@ def save_rendering_dataset(
     import_model(input_path)
     bpy.context.scene.render.engine = backend
     print(bpy.context.scene.cycles.device)
-    
+    # for obj in scene_meshes():   
+        # obj.rotation_euler[0] += math.radians(270)
+        # obj.rotation_euler[2] += math.radians(0)
     normalize_scene()
     if light_mode == "random":
         create_random_lights()

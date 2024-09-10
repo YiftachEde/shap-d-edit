@@ -8,18 +8,22 @@ import os
 from shap_e.util.image_util import load_image
 from shap_e.models.download import load_model
 from shap_e.util.data_util import load_or_create_multimodal_batch
-from shap_e.util.notebooks import create_pan_cameras, decode_latent_images,decode_latent_mesh,decode_latent_mask_by_bbox, gif_widget
+from shap_e.util.notebooks import create_pan_cameras, decode_latent_images,decode_latent_mesh
 from shap_e.diffusion.k_diffusion import GaussianToKarrasDenoiser
 from plotly.subplots import make_subplots
 import plotly.graph_objects as go
 
 # Argument Parsing
 parser = argparse.ArgumentParser(description='Run the model with specified configurations.')
-parser.add_argument('--guide_image', type=str, required=True, help='Path to the guide image file.')
+parser.add_argument('--guide_image', type=str, help='Path to the guide image file.')
 parser.add_argument('--model_path', type=str, required=True, help='Path to the model file.')
 parser.add_argument('--inversion_method', type=str, choices=['ddim', 'ddpm'], required=True, help='Method of inversion to use (ddim or ddpm).')
 parser.add_argument('--output_dir', type=str, default='./output', help='Directory to save output GIF.')
-parser.add_argument('--num_edit_variations', type=int, default=5, help='how many latents to generate')
+parser.add_argument('--num_edit_variations', type=int, default=1, help='how many latents to generate')
+parser.add_argument('--edit_strength', type=float, default=1.0, help='Strength of edit')
+parser.add_argument('--num_edit_steps', type=int, default=128, help='Number of edit steps')
+parser.add_argument('--edit_prompt', type=str, default="a car", help='Prompt for editing')
+parser.add_argument('--source_prompt', type=str, default="a car", help='Prompt for source')
 parser.add_argument('--output_type', type=str, default="obj", help='Output mesh or images')
 
 args = parser.parse_args()
@@ -34,7 +38,7 @@ batch = load_or_create_multimodal_batch(
     model_path=model_path,
     mv_light_mode="basic",
     mv_image_size=256,
-    cache_dir=f"example_data/{os.path.basename(model_path)}",
+    cache_dir=f"cached_data/{os.path.basename(model_path)}",
     verbose=True,  # this will show Blender output during renders
 )
 
@@ -65,7 +69,7 @@ except:
         # diffusion = GaussianDiffusion(betas=np.load("betas.npy"),model_mean_type=diffusion.model_mean_type,model_var_type=diffusion.model_var_type,loss_type=diffusion.loss_type,discretized_t0=diffusion.discretized_t0,channel_biases=diffusion.channel_biases,channel_scales=diffusion.channel_scales)
         zs_batch,latents_noised_batch = [],[]
         for i in range(0,args.num_edit_variations):
-            _,zs,latents_noised = diffusion.ddpm_inversion(model=text_guidance_model,x0=latent,cfg_scale=15, clip_denoised=False, model_kwargs=dict(texts=["a car"] * 1),num_inference_steps=128)
+            _,zs,latents_noised = diffusion.ddpm_inversion(model=text_guidance_model,x0=latent,cfg_scale=15, clip_denoised=False, model_kwargs=dict(texts=[args.source_prompt] * 1),num_inference_steps=args.num_edit_steps)
             zs_batch.append(zs)
             latents_noised_batch.append(latents_noised)
     else:
@@ -81,7 +85,9 @@ if args.inversion_method == 'ddpm':
     latents_new = []
     for i in range(0,args.num_edit_variations):
         text_guidance_model = load_model('text300M', device=device)
-        latents_new_cur,_ = diffusion.inversion_reverse_process(text_guidance_model,latents_noised_batch[i][65],prompts=["an SUV car"],cfg_scales=15,prog_bar=True,zs=zs_batch[i][:65],clip_denoised=False)
+        start_step = int(args.num_edit_steps*(args.edit_strength))
+        print(f"Starting edit at step {start_step}")
+        latents_new_cur,_ = diffusion.inversion_reverse_process(text_guidance_model,latents_noised_batch[i][start_step],prompts=[args.edit_prompt],cfg_scales=12,prog_bar=True,zs=zs_batch[i][:start_step],clip_denoised=False)
         latents_new.append(latents_new_cur)
     latents_new = torch.stack(latents_new)
 else:
@@ -147,7 +153,7 @@ for i, latent_code in enumerate(latents_new):
     with torch.no_grad():
         # if args.output_type == "images":
         mesh = decode_latent_mesh(xm, latent_code.float()).tri_mesh()
-        with open(f'output/doctor_hat_{i}.obj', 'w') as f:
+        with open(f'output/{args.edit_prompt.replace(" ","_")}_{i}.obj', 'w') as f:
             mesh.write_obj(f)
         decoder_output = decode_latent_images(xm, latent_code.float(), cameras, rendering_mode='stf')
         arr = decoder_output.clamp(0, 255).to(torch.uint8)[0].cpu().numpy()
@@ -166,7 +172,7 @@ for i, latent_code in enumerate(latents_new):
             os.makedirs(args.output_dir)
 
         # Further down in your script, after generating the images list
-        gif_path = os.path.join(args.output_dir, f'doctor_hat_{i}.gif')
+        gif_path = os.path.join(args.output_dir, f'{args.edit_prompt.replace(" ","_")}_{i}.gif')
         images[0].save(gif_path, format='GIF', save_all=True, append_images=images[1:], duration=200, loop=0)
 
         print(f"Saved GIF to {gif_path}")

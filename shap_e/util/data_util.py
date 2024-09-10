@@ -24,7 +24,7 @@ def load_or_create_multimodal_batch(
     model_path: Optional[str] = None,
     cache_dir: Optional[str] = None,
     point_count: int = 2**14,
-    random_sample_count: int = 2**17,
+    random_sample_count: int = 2**19,
     pc_num_views: int = 40,
     mv_light_mode: Optional[str] = None,
     mv_num_views: int = 20,
